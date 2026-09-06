@@ -30,6 +30,7 @@ from ReportEngine.utils.chart_validator import (
 )
 from ReportEngine.utils.chart_repair_api import create_llm_repair_functions
 from ReportEngine.utils.chart_review_service import get_chart_review_service
+from common.provenance.citation_service import CitationService
 
 
 class HTMLRenderer:
@@ -110,6 +111,7 @@ class HTMLRenderer:
         self._current_chapter: Dict[str, Any] | None = None
         self._lib_cache: Dict[str, str] = {}
         self._pdf_font_base64: str | None = None
+        self.citation_service = CitationService()
 
         # 初始化图表验证和修复器
         self.chart_validator = create_chart_validator()
@@ -291,6 +293,7 @@ class HTMLRenderer:
             str: 可直接写入磁盘的完整HTML文档。
         """
         self.document = document_ir or {}
+        self.citation_service = CitationService(self.document.get("provenanceBundle"))
 
         # 使用统一的 ChartReviewService 进行图表审查与修复
         # 修复结果会直接回写到 document_ir，避免多次渲染重复修复
@@ -384,7 +387,7 @@ class HTMLRenderer:
         返回:
             str: head片段HTML。
         """
-        css = self._build_css(theme_tokens)
+        css = self._build_css(theme_tokens) + "\n" + self._citation_css()
 
         # 加载第三方库
         chartjs = self._load_lib("chart.js")
@@ -1213,7 +1216,75 @@ class HTMLRenderer:
                 return standalone
 
         inlines = "".join(self._render_inline(run) for run in inlines_data)
-        return f"<p>{inlines}</p>"
+        citations = self._render_citations(block)
+        support_status = str(block.get("support_status") or "")
+        classes = ["report-paragraph"]
+        if support_status in {"weak", "unsupported", "predicted"}:
+            classes.append(f"support-{support_status}")
+        label = self._render_claim_type_label(block)
+        class_attr = " ".join(classes)
+        return f'<p class="{class_attr}">{label}{inlines}{citations}</p>'
+
+    def _render_claim_type_label(self, block: Dict[str, Any]) -> str:
+        claim_types = {
+            str(item.get("claim_type") or "")
+            for item in block.get("claims", []) or []
+            if isinstance(item, dict)
+        }
+        if "prediction" in claim_types:
+            return '<span class="claim-kind-badge">预测</span>'
+        if "recommendation" in claim_types:
+            return '<span class="claim-kind-badge">建议</span>'
+        if block.get("support_status") == "weak":
+            return '<span class="claim-kind-badge weak">弱支持</span>'
+        return ""
+
+    def _render_citations(self, block: Dict[str, Any]) -> str:
+        evidence_ids = self.citation_service.evidence_ids_for_block(block)
+        fragments = []
+        for detail in self.citation_service.details_for_ids(evidence_ids):
+            evidence_id = self._escape_attr(detail["evidence_id"])
+            title = self._escape_html(detail.get("title") or "未命名来源")
+            platform = self._escape_html(detail.get("platform") or "未知平台")
+            publish_time = self._escape_html(detail.get("publish_time") or "时间未知")
+            snippet = self._escape_html(detail.get("snippet") or "无证据片段")
+            reason = self._escape_html(detail.get("selection_reason") or "与本段主张直接关联")
+            raw_url = str(detail.get("url") or "")
+            safe_url = raw_url if re.match(r"^https?://", raw_url, re.IGNORECASE) else f"#citation-{evidence_id}"
+            href = self._escape_attr(safe_url)
+            number = int(detail["number"])
+            fragments.append(
+                f'<sup class="citation-ref" id="citation-{evidence_id}" data-evidence-id="{evidence_id}">'
+                f'<a href="{href}" target="_blank" rel="noopener noreferrer" '
+                f'aria-label="查看来源 {number}">[{number}]</a>'
+                f'<span class="citation-tooltip" role="tooltip">'
+                f'<strong>{title}</strong><span>{platform} · {publish_time}</span>'
+                f'<span class="citation-snippet">{snippet}</span>'
+                f'<span class="citation-reason">引用理由：{reason}</span>'
+                f'</span></sup>'
+            )
+        return "".join(fragments)
+
+    @staticmethod
+    def _citation_css() -> str:
+        return """
+.report-paragraph { position: relative; }
+.citation-ref { position: relative; display: inline-block; margin-left: .18rem; font-size: .72em; line-height: 1; }
+.citation-ref > a { color: var(--primary, #0b6b57); font-weight: 700; text-decoration: none; }
+.citation-ref > a:hover, .citation-ref > a:focus { text-decoration: underline; }
+.citation-tooltip { position: absolute; z-index: 30; left: 50%; bottom: calc(100% + .55rem); width: min(22rem, 78vw); transform: translateX(-50%) translateY(.25rem); padding: .8rem .9rem; border: 1px solid rgba(20, 55, 48, .18); border-radius: .65rem; background: #fffdf7; color: #18352f; box-shadow: 0 12px 34px rgba(14, 42, 36, .18); font-size: .78rem; font-weight: 400; line-height: 1.45; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .16s ease, transform .16s ease; }
+.citation-tooltip > span { display: block; margin-top: .3rem; }
+.citation-tooltip .citation-snippet { max-height: 7.5rem; overflow: auto; }
+.citation-tooltip .citation-reason { color: #42675f; }
+.citation-ref:hover .citation-tooltip, .citation-ref:focus-within .citation-tooltip { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+.claim-kind-badge { display: inline-flex; margin-right: .45rem; padding: .12rem .42rem; border-radius: 999px; background: #fff0c2; color: #764d00; font-size: .72em; font-weight: 700; vertical-align: .1em; }
+.claim-kind-badge.weak { background: #f1ede3; color: #655d4e; }
+.support-predicted { border-left: 3px solid #d39a1e; padding-left: .75rem; }
+.support-weak { border-left: 3px solid #a99b7c; padding-left: .75rem; }
+.support-unsupported { color: #766f61; font-style: italic; }
+@media (max-width: 640px) { .citation-tooltip { left: auto; right: -1rem; transform: translateY(.25rem); } .citation-ref:hover .citation-tooltip, .citation-ref:focus-within .citation-tooltip { transform: translateY(0); } }
+@media print { .citation-tooltip { display: none; } .citation-ref > a { color: inherit; } }
+"""
 
     def _is_metadata_paragraph(self, inlines: List[Any]) -> bool:
         """

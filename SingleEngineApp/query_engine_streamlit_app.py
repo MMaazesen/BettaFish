@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from QueryEngine import DeepSearchAgent, Settings
 from config import settings
+from common.provenance.runtime import publish_runtime_result
 from utils.github_issues import error_with_issue_link
 
 
@@ -82,8 +83,12 @@ def main():
     start_research = False
     query = auto_query
 
-    if auto_search and auto_query and 'auto_search_executed' not in st.session_state:
-        st.session_state.auto_search_executed = True
+    run_id = query_params.get('run_id', '')
+    if isinstance(run_id, list):
+        run_id = run_id[0] if run_id else ''
+    execution_key = run_id or auto_query
+    if auto_search and auto_query and st.session_state.get('auto_search_executed') != execution_key:
+        st.session_state.auto_search_executed = execution_key
         start_research = True
     elif auto_query and not auto_search:
         st.warning("等待搜索启动信号...")
@@ -118,10 +123,10 @@ def main():
         )
 
         # 执行研究
-        execute_research(query, config)
+        execute_research(query, config, run_id)
 
 
-def execute_research(query: str, config: Settings):
+def execute_research(query: str, config: Settings, run_id: str = ''):
     """执行研究"""
     try:
         # 创建进度条
@@ -160,6 +165,7 @@ def execute_research(query: str, config: Settings):
         # 生成最终报告
         status_text.text("正在生成最终报告...")
         final_report = agent._generate_final_report()
+        publish_runtime_result(run_id, 'query', query, final_report, agent.state.provenance_bundle)
         progress_bar.progress(90)
 
         # 保存报告

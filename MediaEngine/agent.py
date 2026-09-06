@@ -22,6 +22,13 @@ from .state import State
 from .tools import BochaMultimodalSearch, BochaResponse, AnspireAISearch, AnspireResponse
 from .utils import settings, Settings, format_search_results_for_prompt
 
+from common.provenance.io import save_sidecar
+from common.provenance.models import ProvenanceBundle
+from common.provenance.normalizer import (
+    add_search_results_to_bundle,
+    stable_id,
+)
+
 
 class DeepSearchAgent:
     """Deep Search Agent主类"""
@@ -69,6 +76,112 @@ class DeepSearchAgent:
         self.first_summary_node = FirstSummaryNode(self.llm_client)
         self.reflection_summary_node = ReflectionSummaryNode(self.llm_client)
         self.report_formatting_node = ReportFormattingNode(self.llm_client)
+
+    def _capture_provenance(
+        self,
+        search_results: List[Dict[str, Any]],
+        search_query: str,
+        paragraph_title: str,
+        search_tool: str,
+    ) -> None:
+        enriched_results = []
+        for result in search_results:
+            item = dict(result)
+            locator = dict(item.get("locator") or {})
+            for key in ("post_id", "comment_id", "timestamp"):
+                if item.get(key) not in (None, ""):
+                    locator[key] = item[key]
+            item["locator"] = locator
+            item["search_tool"] = search_tool
+            if locator.get("comment_id"):
+                item["source_type"] = item["evidence_type"] = "comment"
+            elif locator.get("timestamp") or locator.get("post_id"):
+                item["source_type"] = item["evidence_type"] = "video"
+            elif item.get("ocr_text"):
+                item["source_type"] = "social"
+                item["evidence_type"] = "ocr"
+                item["content"] = item.get("ocr_text")
+            else:
+                item["source_type"] = "web"
+                item["evidence_type"] = "web"
+            enriched_results.append(item)
+        self.state.provenance_bundle = add_search_results_to_bundle(
+            self.state.provenance_bundle,
+            agent="media_engine",
+            results=enriched_results,
+            query=search_query,
+            paragraph_title=paragraph_title,
+        )
+
+    def _capture_multimodal_artifacts(
+        self,
+        response: Any,
+        search_query: str,
+        paragraph_title: str,
+    ) -> None:
+        """Keep OCR/image/video locations without treating API summaries as evidence."""
+        records = []
+        for image in getattr(response, "images", []) or []:
+            snippet = str(getattr(image, "ocr_text", None) or getattr(image, "name", "") or "").strip()
+            if not snippet:
+                continue
+            url = str(getattr(image, "host_page_url", None) or getattr(image, "content_url", "") or "")
+            records.append(
+                {
+                    "title": str(getattr(image, "name", "") or "图像证据"),
+                    "url": url,
+                    "content": snippet,
+                    "ocr_text": getattr(image, "ocr_text", None),
+                    "source_type": "social",
+                    "evidence_type": "ocr" if getattr(image, "ocr_text", None) else "image_metadata",
+                    "locator": {"content_url": str(getattr(image, "content_url", "") or "")},
+                    "scope": {"subject": paragraph_title, "query": search_query},
+                }
+            )
+
+        for card in getattr(response, "modal_cards", []) or []:
+            content = getattr(card, "content", {}) or {}
+            if not isinstance(content, dict):
+                continue
+            card_type = str(getattr(card, "card_type", "multimodal") or "multimodal")
+            snippet = json.dumps(content, ensure_ascii=False, sort_keys=True)[:2000]
+            locator = {
+                "post_id": content.get("post_id") or content.get("postId"),
+                "comment_id": content.get("comment_id") or content.get("commentId"),
+                "timestamp": content.get("timestamp") or content.get("videoTimestamp"),
+            }
+            locator = {key: value for key, value in locator.items() if value not in (None, "")}
+            evidence_type = "comment" if locator.get("comment_id") else "video" if locator else "multimodal"
+            url = str(
+                content.get("url")
+                or content.get("sourceUrl")
+                or content.get("videoUrl")
+                or content.get("link")
+                or ""
+            )
+            records.append(
+                {
+                    "title": str(content.get("title") or content.get("name") or card_type),
+                    "url": url,
+                    "content": snippet,
+                    "normalized_value": content,
+                    "source_type": "video" if evidence_type == "video" else "social",
+                    "evidence_type": evidence_type,
+                    "locator": locator,
+                    "scope": {"subject": paragraph_title, "query": search_query, "card_type": card_type},
+                }
+            )
+
+        if records:
+            self.state.provenance_bundle = add_search_results_to_bundle(
+                self.state.provenance_bundle,
+                agent="media_engine",
+                results=records,
+                query=search_query,
+                paragraph_title=paragraph_title,
+                source_type="social",
+                evidence_type="multimodal",
+            )
     
     def _validate_date_format(self, date_str: str) -> bool:
         """
@@ -144,6 +257,12 @@ class DeepSearchAgent:
         logger.info(f"\n{'='*60}")
         logger.info(f"开始深度研究: {query}")
         logger.info(f"{'='*60}")
+
+        self.state.provenance_bundle = ProvenanceBundle(
+            agent="media_engine",
+            bundle_id=stable_id("bundle", "media_engine", query, datetime.now().isoformat()),
+            meta={"query": query},
+        )
         
         try:
             # Step 1: 生成报告结构
@@ -250,7 +369,11 @@ class DeepSearchAgent:
                     'content': result.snippet,
                     'score': None,  # Bocha API不提供score
                     'raw_content': result.snippet,
-                    'published_date': result.date_last_crawled  # 使用爬取日期
+                    'published_date': result.date_last_crawled,  # 使用爬取日期
+                    'post_id': result.post_id,
+                    'comment_id': result.comment_id,
+                    'timestamp': result.timestamp,
+                    'ocr_text': result.ocr_text,
                 })
         
         if search_results:
@@ -269,6 +392,8 @@ class DeepSearchAgent:
             search_tool=search_tool,
             paragraph_title=paragraph.title,
         )
+        self._capture_provenance(search_results, search_query, paragraph.title, search_tool)
+        self._capture_multimodal_artifacts(search_response, search_query, paragraph.title)
         
         # 生成初始总结
         logger.info("  - 生成初始总结...")
@@ -333,7 +458,11 @@ class DeepSearchAgent:
                         'content': result.snippet,
                         'score': None,  # Bocha API不提供score
                         'raw_content': result.snippet,
-                        'published_date': result.date_last_crawled
+                        'published_date': result.date_last_crawled,
+                        'post_id': result.post_id,
+                        'comment_id': result.comment_id,
+                        'timestamp': result.timestamp,
+                        'ocr_text': result.ocr_text,
                     })
             
             if search_results:
@@ -352,6 +481,8 @@ class DeepSearchAgent:
                 search_tool=search_tool,
                 paragraph_title=paragraph.title,
             )
+            self._capture_provenance(search_results, search_query, paragraph.title, search_tool)
+            self._capture_multimodal_artifacts(search_response, search_query, paragraph.title)
             
             # 生成反思总结
             reflection_summary_input = {
@@ -412,8 +543,11 @@ class DeepSearchAgent:
         # 保存报告
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(report_content)
+
+        sidecar = save_sidecar(self.state.provenance_bundle, filepath)
         
         logger.info(f"报告已保存到: {filepath}")
+        logger.info(f"证据审计文件已保存到: {sidecar}")
         
         # 保存状态（如果配置允许）
         if self.config.SAVE_INTERMEDIATE_STATES:

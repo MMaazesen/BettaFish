@@ -9,9 +9,42 @@ from pathlib import Path
 from datetime import datetime
 import re
 import json
-from typing import Dict, Optional, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, List
 from threading import Lock
 from loguru import logger
+
+
+@dataclass
+class ForumMessage:
+    """Structured forum message; its text is context, never evidence itself."""
+
+    content: str = ""
+    source: str = ""
+    timestamp: str = ""
+    referenced_evidence_ids: List[str] = field(default_factory=list)
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "content": self.content,
+            "source": self.source,
+            "timestamp": self.timestamp,
+            "referenced_evidence_ids": list(self.referenced_evidence_ids),
+            "meta": dict(self.meta),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ForumMessage":
+        data = data or {}
+        refs = data.get("referenced_evidence_ids") or []
+        return cls(
+            content=str(data.get("content") or ""),
+            source=str(data.get("source") or ""),
+            timestamp=str(data.get("timestamp") or ""),
+            referenced_evidence_ids=[str(item) for item in refs if item],
+            meta=dict(data.get("meta") or {}),
+        )
 
 # 导入论坛主持人模块
 try:
@@ -103,7 +136,12 @@ class LogMonitor:
         except Exception as e:
             logger.exception(f"ForumEngine: 清空forum.log失败: {e}")
    
-    def write_to_forum_log(self, content: str, source: str = None):
+    def write_to_forum_log(
+        self,
+        content: str,
+        source: str = None,
+        referenced_evidence_ids: Optional[List[str]] = None,
+    ):
         """写入内容到forum.log（线程安全）"""
         try:
             with self.write_lock:  # 使用锁确保线程安全
@@ -111,9 +149,13 @@ class LogMonitor:
                     timestamp = datetime.now().strftime('%H:%M:%S')
                     # 将内容中的实际换行符转换为\n字符串，确保整个记录在一行
                     content_one_line = content.replace('\n', '\\n').replace('\r', '\\r')
+                    evidence_prefix = ""
+                    if referenced_evidence_ids:
+                        refs = list(dict.fromkeys(str(item) for item in referenced_evidence_ids if item))
+                        evidence_prefix = f"[EVIDENCE_IDS:{json.dumps(refs, ensure_ascii=False)}] "
                     # 如果提供了来源标签，则在时间戳后添加
                     if source:
-                        f.write(f"[{timestamp}] [{source}] {content_one_line}\n")
+                        f.write(f"[{timestamp}] [{source}] {evidence_prefix}{content_one_line}\n")
                     else:
                         f.write(f"[{timestamp}] {content_one_line}\n")
                     f.flush()

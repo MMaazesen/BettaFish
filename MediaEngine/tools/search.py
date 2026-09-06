@@ -55,6 +55,10 @@ class WebpageResult:
     snippet: str
     display_url: Optional[str] = None
     date_last_crawled: Optional[str] = None
+    post_id: Optional[str] = None
+    comment_id: Optional[str] = None
+    timestamp: Optional[str] = None
+    ocr_text: Optional[str] = None
 
 @dataclass
 class ImageResult:
@@ -65,6 +69,7 @@ class ImageResult:
     thumbnail_url: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    ocr_text: Optional[str] = None
 
 @dataclass
 class ModalCardResult:
@@ -159,7 +164,11 @@ class BochaMultimodalSearch:
                             url=item.get('url'),
                             snippet=item.get('snippet'),
                             display_url=item.get('displayUrl'),
-                            date_last_crawled=item.get('dateLastCrawled')
+                            date_last_crawled=item.get('dateLastCrawled'),
+                            post_id=item.get('postId') or item.get('post_id'),
+                            comment_id=item.get('commentId') or item.get('comment_id'),
+                            timestamp=item.get('timestamp') or item.get('videoTimestamp'),
+                            ocr_text=item.get('ocrText') or item.get('ocr_text'),
                         ))
                 elif content_type == 'image':
                     final_response.images.append(ImageResult(
@@ -168,7 +177,8 @@ class BochaMultimodalSearch:
                         host_page_url=content_data.get('hostPageUrl'),
                         thumbnail_url=content_data.get('thumbnailUrl'),
                         width=content_data.get('width'),
-                        height=content_data.get('height')
+                        height=content_data.get('height'),
+                        ocr_text=content_data.get('ocrText') or content_data.get('ocr_text')
                     ))
                 # 所有其他 content_type 都视为模态卡
                 else:

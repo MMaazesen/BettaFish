@@ -25,6 +25,7 @@ V3.0 核心更新:
 
 import os
 import json
+import copy
 from loguru import logger
 import asyncio
 from typing import List, Dict, Any, Optional, Literal
@@ -48,6 +49,8 @@ class QueryResult:
     source_keyword: Optional[str] = None
     hotness_score: float = 0.0
     source_table: str = ""
+    record_id: str = ""
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class DBResponse:
@@ -57,6 +60,23 @@ class DBResponse:
     results: List[QueryResult] = field(default_factory=list)
     results_count: int = 0
     error_message: Optional[str] = None
+    query_time: str = field(default_factory=lambda: datetime.now().isoformat())
+    time_window: Dict[str, Any] = field(default_factory=dict)
+    tables: List[str] = field(default_factory=list)
+    aggregation_method: str = "record_lookup"
+
+    def __post_init__(self):
+        # Attach lineage before keyword expansion, deduplication or sampling can discard it.
+        if not self.query_time or not self.time_window or not self.aggregation_method:
+            return
+        for row in self.results:
+            if not row.provenance and row.source_table and row.record_id:
+                row.provenance = {
+                    "query_time": self.query_time, "table": row.source_table,
+                    "filters": copy.deepcopy(self.parameters), "time_window": dict(self.time_window),
+                    "sample_size": len(self.results), "aggregation_method": self.aggregation_method,
+                    "row_ids": [row.record_id], "primary_key": row.record_id,
+                }
 
 # --- 2. 核心客户端与专用工具集 ---
 
@@ -167,7 +187,7 @@ class MediaCrawlerDB:
             else: time_filter_sql, time_filter_param = "`create_time` >= %s", str(int(start_time.timestamp()))
 
             content_type = 'note' if table in ['weibo_note', 'xhs_note'] else 'content' if table == 'zhihu_content' else 'video'
-            query_template = "SELECT '{platform}' as p, '{type}' as t, {title} as title, {author} as author, {url} as url, {ts} as ts, {formula} as hotness_score, source_keyword, '{tbl}' as tbl FROM `{tbl}` WHERE {time_filter}"
+            query_template = "SELECT id as record_id, '{platform}' as p, '{type}' as t, {title} as title, {author} as author, {url} as url, {ts} as ts, {formula} as hotness_score, source_keyword, '{tbl}' as tbl FROM `{tbl}` WHERE {time_filter}"
             
             field_subs = {'platform': table.split('_')[0], 'type': content_type, 'title': 'title', 'author': 'nickname', 'url': 'video_url', 'ts': 'create_time', 'formula': formula, 'tbl': table, 'time_filter': time_filter_sql}
             if table == 'weibo_note': field_subs.update({'title': 'content', 'url': 'note_url', 'ts': 'create_date_time'})
@@ -181,14 +201,35 @@ class MediaCrawlerDB:
         final_query = f"({' ) UNION ALL ( '.join(all_queries)}) ORDER BY hotness_score DESC LIMIT %s"
         raw_results = self._execute_query(final_query, tuple(params) + (limit,))
 
-        formatted_results = [QueryResult(platform=r['p'], content_type=r['t'], title_or_content=r['title'], author_nickname=r.get('author'), url=r['url'], publish_time=self._to_datetime(r['ts']), engagement=self._extract_engagement(r), hotness_score=r.get('hotness_score', 0.0), source_keyword=r.get('source_keyword'), source_table=r['tbl']) for r in raw_results]
-        return DBResponse("search_hot_content", params_for_log, results=formatted_results, results_count=len(formatted_results))    
+        formatted_results = [QueryResult(platform=r['p'], content_type=r['t'], title_or_content=r['title'], author_nickname=r.get('author'), url=r['url'], publish_time=self._to_datetime(r['ts']), engagement=self._extract_engagement(r), hotness_score=r.get('hotness_score', 0.0), source_keyword=r.get('source_keyword'), source_table=r['tbl'], record_id=str(r.get('record_id') or '')) for r in raw_results]
+        return DBResponse(
+            "search_hot_content",
+            params_for_log,
+            results=formatted_results,
+            results_count=len(formatted_results),
+            time_window={"start": start_time.isoformat(), "end": now.isoformat()},
+            tables=list(hotness_formulas),
+            aggregation_method="weighted_engagement_rank",
+        )
 
     def _wrap_query_field_with_dialect(self, field: str) -> str:
         """根据数据库方言包装SQL查询"""
         if settings.DB_DIALECT == 'postgresql':
             return f'"{field}"'
         return f'`{field}`'
+
+    def _date_predicate(self, config, start_dt, end_dt):
+        field = self._wrap_query_field_with_dialect(config['time_col'])
+        kind = config['time_type']
+        if kind in {'sec', 'sec_str', 'ms'}:
+            multiplier = 1000 if kind == 'ms' else 1
+            bounds = (int(start_dt.timestamp() * multiplier), int(end_dt.timestamp() * multiplier))
+            if kind == 'sec_str':
+                cast_type = 'BIGINT' if settings.DB_DIALECT == 'postgresql' else 'SIGNED'
+                field = f'CAST({field} AS {cast_type})'
+        else:
+            bounds = (start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d'))
+        return f'{field} >= :window_start AND {field} < :window_end', {'window_start': bounds[0], 'window_end': bounds[1]}
 
     def search_topic_globally(self, topic: str, limit_per_table: int = 100) -> DBResponse:
         """
@@ -229,9 +270,10 @@ class MediaCrawlerDB:
                     publish_time=self._to_datetime(time_key),
                     engagement=self._extract_engagement(row),
                     source_keyword=row.get('source_keyword'),
-                    source_table=table
+                    source_table=table,
+                    record_id=str(row.get('id') or '')
                 ))
-        return DBResponse("search_topic_globally", params_for_log, results=all_results, results_count=len(all_results))
+        return DBResponse("search_topic_globally", params_for_log, results=all_results, results_count=len(all_results), tables=list(search_configs), time_window={"kind": "unbounded"}, aggregation_method="record_lookup")
 
     def search_topic_by_date(self, topic: str, start_date: str, end_date: str, limit_per_table: int = 100) -> DBResponse:
         """
@@ -271,7 +313,9 @@ class MediaCrawlerDB:
                 param_dict[pname] = search_term
             param_dict['limit'] = limit_per_table
             where_clause = ' OR '.join(where_clauses)
-            query = f'SELECT * FROM {self._wrap_query_field_with_dialect(table)} WHERE {where_clause} ORDER BY id DESC LIMIT :limit'
+            time_clause, time_params = self._date_predicate(config, start_dt, end_dt)
+            param_dict.update(time_params)
+            query = f'SELECT * FROM {self._wrap_query_field_with_dialect(table)} WHERE ({where_clause}) AND ({time_clause}) ORDER BY id DESC LIMIT :limit'
             raw_results = self._execute_query(query, param_dict)
             for row in raw_results:
                 content = (row.get('title') or row.get('content') or row.get('desc') or row.get('content_text', ''))
@@ -284,9 +328,18 @@ class MediaCrawlerDB:
                     publish_time=self._to_datetime(time_key),
                     engagement=self._extract_engagement(row),
                     source_keyword=row.get('source_keyword'),
-                    source_table=table
+                    source_table=table,
+                    record_id=str(row.get('id') or '')
                 ))
-        return DBResponse("search_topic_by_date", params_for_log, results=all_results, results_count=len(all_results))
+        return DBResponse(
+            "search_topic_by_date",
+            params_for_log,
+            results=all_results,
+            results_count=len(all_results),
+            time_window={"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+            tables=list(search_configs),
+            aggregation_method="record_lookup",
+        )
         
     def get_comments_for_topic(self, topic: str, limit: int = 500) -> DBResponse:
         """
@@ -313,7 +366,7 @@ class MediaCrawlerDB:
             time_col = 'publish_time' if 'publish_time' in cols else 'create_date_time' if 'create_date_time' in cols else 'create_time'
             like_select = f"`{like_col}` as likes" if like_col else "'0' as likes"
             
-            query = (f"SELECT '{table.split('_')[0]}' as platform, `content`, `{author_col}` as author, "
+            query = (f"SELECT `id` as record_id, '{table.split('_')[0]}' as platform, `content`, `{author_col}` as author, "
                      f"`{time_col}` as ts, {like_select}, '{table}' as source_table "
                      f"FROM `{table}` WHERE `content` LIKE %s")
             all_queries.append(query)
@@ -322,8 +375,8 @@ class MediaCrawlerDB:
         params = (search_term,) * len(comment_tables) + (limit,)
         raw_results = self._execute_query(final_query, params)
         
-        formatted = [QueryResult(platform=r['platform'], content_type='comment', title_or_content=r['content'], author_nickname=r['author'], publish_time=self._to_datetime(r['ts']), engagement={'likes': int(r['likes']) if str(r['likes']).isdigit() else 0}, source_table=r['source_table']) for r in raw_results]
-        return DBResponse("get_comments_for_topic", params_for_log, results=formatted, results_count=len(formatted))
+        formatted = [QueryResult(platform=r['platform'], content_type='comment', title_or_content=r['content'], author_nickname=r['author'], publish_time=self._to_datetime(r['ts']), engagement={'likes': int(r['likes']) if str(r['likes']).isdigit() else 0}, source_table=r['source_table'], record_id=str(r.get('record_id') or '')) for r in raw_results]
+        return DBResponse("get_comments_for_topic", params_for_log, results=formatted, results_count=len(formatted), tables=comment_tables, time_window={"kind": "unbounded"}, aggregation_method="record_lookup")
 
     def search_topic_on_platform(
         self,
@@ -392,9 +445,17 @@ class MediaCrawlerDB:
             for row in raw_results:
                 content = (row.get('title') or row.get('content') or row.get('desc') or row.get('content_text', ''))
                 time_key = config.get('time_col') and row.get(config.get('time_col'))
-                all_results.append(QueryResult(platform=platform, content_type=config['type'], title_or_content=content if content else '', author_nickname=row.get('nickname') or row.get('user_nickname'), url=row.get('video_url') or row.get('note_url') or row.get('content_url') or row.get('url') or row.get('aweme_url'), publish_time=self._to_datetime(time_key), engagement=self._extract_engagement(row), source_keyword=row.get('source_keyword'), source_table=table))
+                all_results.append(QueryResult(platform=platform, content_type=config['type'], title_or_content=content if content else '', author_nickname=row.get('nickname') or row.get('user_nickname'), url=row.get('video_url') or row.get('note_url') or row.get('content_url') or row.get('url') or row.get('aweme_url'), publish_time=self._to_datetime(time_key), engagement=self._extract_engagement(row), source_keyword=row.get('source_keyword'), source_table=table, record_id=str(row.get('id') or '')))
         
-        return DBResponse("search_topic_on_platform", params_for_log, results=all_results, results_count=len(all_results))
+        return DBResponse(
+            "search_topic_on_platform",
+            params_for_log,
+            results=all_results,
+            results_count=len(all_results),
+            time_window={"start": start_dt.isoformat(), "end": end_dt.isoformat()} if start_dt and end_dt else {},
+            tables=[item["table"] for item in platform_configs],
+            aggregation_method="record_lookup",
+        )
 
 # --- 3. 测试与使用示例 ---
 def print_response_summary(response: DBResponse):

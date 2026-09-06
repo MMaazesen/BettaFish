@@ -32,6 +32,9 @@ from ..prompts import (
 )
 from ..utils.json_parser import RobustJSONParser, JSONParseError
 from .base_node import BaseNode
+from common.provenance.models import ProvenanceBundle
+from common.provenance.selector import EvidenceSelector
+from common.provenance.validators import sanitize_blocks
 
 try:
     from json_repair import repair_json as _json_repair_fn
@@ -167,6 +170,7 @@ class ChapterGenerationNode(BaseNode):
             enable_json_repair=True,
             enable_llm_repair=False,
         )
+        self.evidence_selector = EvidenceSelector(top_k=8)
 
     def run(
         self,
@@ -203,6 +207,11 @@ class ChapterGenerationNode(BaseNode):
         run_id = run_dir.name
         self._ensure_run_state(run_id)
         llm_payload = self._build_payload(section, context)
+        selected_evidence = (llm_payload.get("selectedEvidence") or {}).get("evidence", [])
+        if context.get("enforce_provenance", False) and not selected_evidence:
+            chapter_json = self._build_no_evidence_chapter(section)
+            self.storage.persist_chapter(run_dir, chapter_meta, chapter_json, errors=None)
+            return chapter_json
         user_message = build_chapter_user_prompt(llm_payload)
 
         raw_text = self._stream_llm(
@@ -243,6 +252,9 @@ class ChapterGenerationNode(BaseNode):
         chapter_json.setdefault("title", section.title)
         chapter_json.setdefault("order", section.order)
         self._sanitize_chapter_blocks(chapter_json)
+        if context.get("enforce_provenance", False):
+            selected_bundle = ProvenanceBundle.from_dict(llm_payload["selectedEvidence"])
+            self._sanitize_provenance_claims(chapter_json, selected_bundle)
 
         valid, errors = self.validator.validate_chapter(chapter_json)
         if not valid and errors:
@@ -258,9 +270,11 @@ class ChapterGenerationNode(BaseNode):
                 chapter_json.setdefault("title", section.title)
                 chapter_json.setdefault("order", section.order)
                 self._sanitize_chapter_blocks(chapter_json)
+                if context.get("enforce_provenance", False):
+                    self._sanitize_provenance_claims(chapter_json, selected_bundle)
                 valid, errors = self.validator.validate_chapter(chapter_json)
         content_error: ChapterContentError | None = None
-        if valid and not placeholder_created:
+        if valid and not placeholder_created and not context.get("enforce_provenance", False):
             try:
                 self._ensure_content_density(chapter_json)
             except ChapterContentError as exc:
@@ -311,6 +325,23 @@ class ChapterGenerationNode(BaseNode):
         allow_swot = self._get_chapter_swot_permission(section.chapter_id, context)
         allow_pest = self._get_chapter_pest_permission(section.chapter_id, context)
 
+        chapter_plan_text = json.dumps(chapter_plan or {}, ensure_ascii=False)
+        selected_bundle = self.evidence_selector.select(
+            context.get("provenance_bundle"),
+            chapter_topic=section.title,
+            chapter_draft=" ".join(section.outline or []) + " " + chapter_plan_text,
+            claim_drafts=(chapter_plan or {}).get("emphasis") or [],
+            top_k=context.get("evidence_top_k", 8),
+        )
+        full_bundle = context.get("provenance_bundle")
+        if isinstance(full_bundle, ProvenanceBundle):
+            source_evidence = {item.evidence_id: item for item in full_bundle.evidence}
+            for selected in selected_bundle.evidence:
+                original = source_evidence.get(selected.evidence_id)
+                if original is not None:
+                    original.meta["selection_reason"] = selected.meta.get("selection_reason", "")
+                    original.meta["selection_score"] = selected.meta.get("selection_score", 0)
+
         payload = {
             "section": {
                 "chapterId": section.chapter_id,
@@ -330,20 +361,28 @@ class ChapterGenerationNode(BaseNode):
                 "templateOverview": context.get("template_overview", {}),
             },
             "reports": {
-                "query_engine": reports.get("query_engine", ""),
-                "media_engine": reports.get("media_engine", ""),
-                "insight_engine": reports.get("insight_engine", ""),
+                "query_engine": "",
+                "media_engine": "",
+                "insight_engine": "",
             },
             "forumLogs": context.get("forum_logs", ""),
-            "dataBundles": context.get("data_bundles", []),
+            "dataBundles": [],
+            "selectedEvidence": selected_bundle.to_dict(),
+            "provenancePolicy": {
+                "reportsAreContextOnly": True,
+                "forumTextIsNotEvidence": True,
+                "factMetricRequireEvidenceIds": True,
+                "inferenceMinimumEvidence": 2,
+                "predictionMustBeSeparated": True,
+            },
             "constraints": {
                 "language": "zh-CN",
                 "maxTokens": context.get("max_tokens", 4096),
-                "allowedBlocks": ALLOWED_BLOCK_TYPES,
+                "allowedBlocks": ["heading", "paragraph", "list"],
                 "allowSwot": allow_swot,
                 "allowPest": allow_pest,
                 "styleHints": {
-                    "expectWidgets": True,
+                    "expectWidgets": False,
                     "forceHeadingAnchors": True,
                     "allowInlineMix": True,
                 },
@@ -365,6 +404,32 @@ class ChapterGenerationNode(BaseNode):
                 constraints["sectionBudgets"] = chapter_plan["sections"]
                 payload["globalContext"]["sectionBudgets"] = chapter_plan["sections"]
         return payload
+
+    def _build_no_evidence_chapter(self, section: TemplateSection) -> Dict[str, Any]:
+        return {
+            "chapterId": section.chapter_id,
+            "anchor": section.slug,
+            "title": section.title,
+            "order": section.order,
+            "blocks": [
+                {
+                    "type": "heading",
+                    "level": 2,
+                    "text": section.title,
+                    "anchor": section.slug,
+                },
+                {
+                    "type": "paragraph",
+                    "inlines": [{"text": "本章未检索到可追溯证据。"}],
+                    "claims": [],
+                    "citation_refs": [],
+                    "support_status": "unsupported",
+                },
+            ],
+        }
+
+    def _sanitize_provenance_claims(self, chapter: Dict[str, Any], evidence: ProvenanceBundle) -> None:
+        chapter["blocks"] = sanitize_blocks(chapter.get("blocks", []), evidence)
 
     def _get_chapter_swot_permission(self, chapter_id: str, context: Dict[str, Any]) -> bool:
         """

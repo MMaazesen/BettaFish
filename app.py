@@ -4,6 +4,10 @@ Flask主应用 - 统一管理三个Streamlit应用
 
 import os
 import sys
+import json
+import secrets
+import hmac
+from common.provenance.runtime import runtime_store
 
 # 【修复】尽早设置环境变量，确保所有模块都使用无缓冲模式
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -33,6 +37,7 @@ except ImportError as e:
     REPORT_ENGINE_AVAILABLE = False
 
 app = Flask(__name__)
+PROVENANCE_TOKEN = secrets.token_urlsafe(32)
 app.config['SECRET_KEY'] = 'Dedicated-to-creating-a-concise-and-versatile-public-opinion-analysis-platform'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -397,6 +402,16 @@ def parse_forum_log_line(line):
 
     timestamp, raw_source, content = match.groups()
     source = raw_source.strip().upper()
+    referenced_evidence_ids = []
+    evidence_match = re.match(r'^\[EVIDENCE_IDS:(\[[^\]]*\])\]\s*(.*)$', content)
+    if evidence_match:
+        try:
+            referenced_evidence_ids = [
+                str(item) for item in json.loads(evidence_match.group(1)) if item
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            referenced_evidence_ids = []
+        content = evidence_match.group(2)
 
     # 过滤掉系统消息和空内容
     if source == 'SYSTEM' or not content.strip():
@@ -422,7 +437,8 @@ def parse_forum_log_line(line):
         'sender': sender,
         'content': cleaned_content,
         'timestamp': timestamp,
-        'source': source
+        'source': source,
+        'referenced_evidence_ids': referenced_evidence_ids,
     }
 
 # Forum日志监听器
@@ -664,6 +680,8 @@ def start_streamlit_app(app_name, script_path, port):
         # 设置环境变量确保UTF-8编码和减少缓冲
         env = os.environ.copy()
         env.update({
+            'BETTAFISH_PROVENANCE_ENDPOINT': f"http://127.0.0.1:{_load_config_module().settings.PORT}/api/provenance/result",
+            'BETTAFISH_PROVENANCE_TOKEN': PROVENANCE_TOKEN,
             'PYTHONIOENCODING': 'utf-8',
             'PYTHONUTF8': '1',
             'LANG': 'en_US.UTF-8',
@@ -1148,6 +1166,29 @@ def get_forum_log_history():
         })
     except Exception as e:
         return jsonify({'success': False, 'message': f'读取forum历史失败: {str(e)}'})
+
+@app.route('/api/provenance/runs', methods=['POST'])
+def begin_provenance_run():
+    data = request.get_json(silent=True) or {}
+    try:
+        run_id = runtime_store.begin(str(data.get('query', '')), data.get('engines', []))
+        return jsonify({'success': True, 'run_id': run_id})
+    except (ValueError, TypeError, AttributeError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
+
+@app.route('/api/provenance/result', methods=['POST'])
+def receive_provenance_result():
+    token = request.headers.get('X-Provenance-Token', '')
+    if request.remote_addr not in {'127.0.0.1', '::1'} or not hmac.compare_digest(token, PROVENANCE_TOKEN):
+        return jsonify({'success': False, 'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        runtime_store.publish(data['run_id'], data['engine'], data['query'], data.get('report', ''), data.get('bundle'))
+        return jsonify({'success': True})
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
 
 @app.route('/api/search', methods=['POST'])
 def search():

@@ -3012,7 +3012,7 @@
         }
 
         // 执行搜索
-        function performSearch() {
+        async function performSearch() {
             const query = document.getElementById('searchInput').value.trim();
             if (!query) {
                 showMessage('请输入搜索内容', 'error');
@@ -3022,6 +3022,21 @@
             const button = document.getElementById('searchButton');
             button.disabled = true;
             button.innerHTML = '<span class="loading"></span> 搜索中...';
+            try {
+                const engines = ['query', 'media', 'insight'].filter(name => appStatus[name] === 'running');
+                const response = await fetch('/api/provenance/runs', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, engines })
+                });
+                const result = await response.json();
+                if (!result.success) throw new Error(result.error || '无法创建分析任务');
+                provenanceRunId = result.run_id;
+            } catch (error) {
+                showMessage(error.message, 'error');
+                button.disabled = false;
+                button.textContent = '搜索';
+                return;
+            }
 
             // 清除现有报告，重置自动生成标志，为新搜索做准备
             const reportPreview = document.getElementById('reportPreview');
@@ -3058,7 +3073,7 @@
 
                     if (iframe) {
                         // 构建搜索URL
-                        const searchUrl = `http://${window.location.hostname}:${ports[app]}?query=${encodeURIComponent(query)}&auto_search=true`;
+                        const searchUrl = `http://${window.location.hostname}:${ports[app]}?query=${encodeURIComponent(query)}&auto_search=true&run_id=${encodeURIComponent(provenanceRunId)}`;
                         console.log(`向 ${app} 发送搜索请求: ${searchUrl}`);
 
                         // 检查iframe是否已经加载了相同的查询,避免不必要的重新加载
@@ -3074,7 +3089,7 @@
                             const newQuery = newUrl.searchParams.get('query');
 
                             // 如果query参数相同,不需要重新加载
-                            if (currentQuery === newQuery) {
+                            if (currentQuery === newQuery && currentUrl.searchParams.get('run_id') === provenanceRunId) {
                                 needsUpdate = false;
                                 console.log(`${app} iframe已有相同查询,跳过重新加载`);
                             }
@@ -3753,7 +3768,7 @@ function getConsoleContainer() {
         }
 
         function probeBackendConnection() {
-            fetch('/api/report/status?heartbeat=1', { cache: 'no-store' })
+            fetch(`/api/report/status?heartbeat=1&run_id=${encodeURIComponent(provenanceRunId)}`, { cache: 'no-store' })
             .then(response => {
                 if (!response.ok) throw new Error('heartbeat failed');
                 return response.json();
@@ -4446,7 +4461,7 @@ function getConsoleContainer() {
         let autoGenerateTriggered = false; // 防止重复触发
         
         function checkReportLockStatus() {
-            fetch('/api/report/status')
+            fetch(`/api/report/status?run_id=${encodeURIComponent(provenanceRunId)}`)
             .then(response => response.json())
             .then(data => {
                 const reportButton = document.querySelector('[data-app="report"]');
@@ -4675,6 +4690,7 @@ function getConsoleContainer() {
 
         // Report Engine 相关函数
         let reportTaskId = null;
+        let provenanceRunId = '';
         let reportPollingInterval = null;
         let reportEventSource = null;
         let reportLogRefreshInterval = null; // 日志刷新定时器
@@ -4691,7 +4707,7 @@ function getConsoleContainer() {
             const reportContent = document.getElementById('reportContent');
             
             // 检查ReportEngine状态
-            fetch('/api/report/status')
+            fetch(`/api/report/status?run_id=${encodeURIComponent(provenanceRunId)}`)
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
@@ -5177,7 +5193,7 @@ function getConsoleContainer() {
             addTaskProgressStatus('正在启动报告生成任务...', 'loading');
             
             // 构建请求数据，包含自定义模板（如果有的话）
-            const requestData = { query: query };
+            const requestData = { query: query, run_id: provenanceRunId };
             if (customTemplate && customTemplate.trim()) {
                 requestData.custom_template = customTemplate;
                 console.log('使用自定义模板生成报告');
@@ -5874,7 +5890,7 @@ function getConsoleContainer() {
         // 检查报告状态（不重新加载整个界面）
         function checkReportStatus() {
             // 只更新状态信息，不重新渲染整个界面
-            fetch('/api/report/status')
+            fetch(`/api/report/status?run_id=${encodeURIComponent(provenanceRunId)}`)
             .then(response => response.json())
             .then(data => {
                 if (data.success) {

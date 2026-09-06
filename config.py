@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     MAX_PARAGRAPHS: int = Field(6, description="最大段落数")
     SEARCH_TIMEOUT: int = Field(240, description="单次搜索请求超时")
     MAX_CONTENT_LENGTH: int = Field(500000, description="搜索最大内容长度")
+    PROVENANCE_EVIDENCE_TOP_K: int = Field(8, ge=1, le=50, description="ReportEngine每章证据Top-K")
     
     model_config = ConfigDict(
         env_file=ENV_FILE,

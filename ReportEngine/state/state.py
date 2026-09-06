@@ -8,6 +8,8 @@ from typing import Dict, Any, Optional
 import json
 from datetime import datetime
 
+from common.provenance.models import ProvenanceBundle
+
 
 @dataclass
 class ReportMetadata:
@@ -44,6 +46,7 @@ class ReportState:
     media_engine_report: str = ""        # MediaEngine报告  
     insight_engine_report: str = ""      # InsightEngine报告
     forum_logs: str = ""                 # 论坛日志
+    provenance_bundle: ProvenanceBundle = field(default_factory=lambda: ProvenanceBundle(agent="report_engine"))
     
     # 处理结果
     selected_template: str = ""          # 选择的模板
@@ -100,6 +103,7 @@ class ReportState:
             "selected_template": self.selected_template,
             "has_html_content": bool(self.html_content),
             "html_content_length": len(self.html_content) if self.html_content else 0,
+            "provenance_bundle": self.provenance_bundle.to_dict(),
             "metadata": self.metadata.to_dict()
         }
     
@@ -129,6 +133,7 @@ class ReportState:
                 status=data.get("status", "pending"),
                 selected_template=data.get("selected_template", "")
             )
+            state.provenance_bundle = ProvenanceBundle.from_dict(data.get("provenance_bundle"))
             
             # 设置元数据
             metadata_data = data.get("metadata", {})

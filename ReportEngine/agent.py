@@ -14,7 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Callable, Tuple
+from typing import Optional, Dict, Any, List, Callable, Mapping, Tuple
 
 from loguru import logger
 
@@ -38,6 +38,11 @@ from .nodes import (
 from .renderers import HTMLRenderer
 from .state import ReportState
 from .utils.config import settings, Settings
+
+from common.provenance.io import load_sidecar, save_sidecar
+from common.provenance.models import ProvenanceBundle
+from common.provenance.normalizer import merge_bundles
+from common.provenance.validators import filter_valid_evidence
 
 
 class StageOutputFormatError(ValueError):
@@ -404,7 +409,8 @@ class ReportAgent:
     
     def generate_report(self, query: str, reports: List[Any], forum_logs: str = "",
                         custom_template: str = "", save_report: bool = True,
-                        stream_handler: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> str:
+                        stream_handler: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+                        provenance_bundle: Optional[Any] = None) -> str:
         """
         生成综合报告（章节JSON → IR → HTML）。
 
@@ -437,6 +443,8 @@ class ReportAgent:
         self.state.mark_processing()
 
         normalized_reports = self._normalize_reports(reports)
+        runtime_bundle = self._normalize_provenance_bundle(provenance_bundle, reports)
+        self.state.provenance_bundle = runtime_bundle
 
         def emit(event_type: str, payload: Dict[str, Any]):
             """面向Report Engine流通道的事件分发器，保证错误不外泄。"""
@@ -452,7 +460,9 @@ class ReportAgent:
         emit('stage', {'stage': 'agent_start', 'report_id': report_id, 'query': query})
 
         try:
-            template_result = self._select_template(query, reports, forum_logs, custom_template)
+            template_result = self._select_template(
+                query, list(normalized_reports.values()), forum_logs, custom_template
+            )
             template_result = self._ensure_mapping(
                 template_result,
                 "模板选择结果",
@@ -486,6 +496,7 @@ class ReportAgent:
                 # toc 字段已被 tocPlan 取代，这里按最新Schema挑选/校验
                 expected_keys=["title", "hero", "tocPlan", "tocTitle"],
             )
+            layout_design = self._sanitize_layout_for_provenance(layout_design, runtime_bundle)
             emit('stage', {
                 'stage': 'layout_designed',
                 'title': layout_design.get('title'),
@@ -527,6 +538,7 @@ class ReportAgent:
                 chapter_targets,
                 word_plan,
                 template_overview,
+                runtime_bundle,
             )
             # IR/渲染需要的全局元数据，带上设计稿给出的标题/主题/目录/篇幅信息
             manifest_meta = {
@@ -745,7 +757,8 @@ class ReportAgent:
             document_ir = self.document_composer.build_document(
                 report_id,
                 manifest_meta,
-                chapters
+                chapters,
+                runtime_bundle,
             )
             emit('stage', {'stage': 'chapters_compiled', 'chapter_count': len(chapters)})
             html_report = self.renderer.render(document_ir)
@@ -870,6 +883,7 @@ class ReportAgent:
         chapter_directives: Dict[str, Any],
         word_plan: Dict[str, Any],
         template_overview: Dict[str, Any],
+        provenance_bundle: ProvenanceBundle,
     ) -> Dict[str, Any]:
         """
         构造章节生成所需的共享上下文。
@@ -914,6 +928,9 @@ class ReportAgent:
             "template_overview": template_overview or {},
             "chapter_directives": chapter_directives or {},
             "word_plan": word_plan or {},
+            "provenance_bundle": provenance_bundle,
+            "evidence_top_k": self.config.PROVENANCE_EVIDENCE_TOP_K,
+            "enforce_provenance": True,
         }
 
     def _normalize_reports(self, reports: List[Any]) -> Dict[str, str]:
@@ -933,8 +950,53 @@ class ReportAgent:
         normalized: Dict[str, str] = {}
         for idx, key in enumerate(keys):
             value = reports[idx] if idx < len(reports) else ""
+            if isinstance(value, Mapping):
+                value = (
+                    value.get("content")
+                    or value.get("report")
+                    or value.get("text")
+                    or value.get("final_report")
+                    or ""
+                )
             normalized[key] = self._stringify(value)
         return normalized
+
+    def _normalize_provenance_bundle(
+        self,
+        explicit_bundle: Optional[Any],
+        reports: List[Any],
+    ) -> ProvenanceBundle:
+        bundles: List[Any] = []
+        if isinstance(explicit_bundle, (list, tuple)):
+            bundles.extend(explicit_bundle)
+        elif explicit_bundle:
+            bundles.append(explicit_bundle)
+        for report in reports:
+            if not isinstance(report, Mapping):
+                continue
+            bundle = report.get("provenance_bundle") or report.get("provenance")
+            if bundle:
+                bundles.append(bundle)
+        return filter_valid_evidence(merge_bundles(bundles))
+
+    def _sanitize_layout_for_provenance(
+        self,
+        layout: Dict[str, Any],
+        bundle: ProvenanceBundle,
+    ) -> Dict[str, Any]:
+        sanitized = deepcopy(layout or {})
+        evidence_count = len(bundle.evidence)
+        sanitized["hero"] = {
+            "summary": (
+                f"本报告基于 {evidence_count} 条可追溯证据生成，正文引用可查看来源详情。"
+                if evidence_count
+                else "当前未检索到可追溯证据，正文仅保留证据状态说明。"
+            ),
+            "highlights": [],
+            "kpis": [],
+            "actions": [],
+        }
+        return sanitized
 
     def _should_retry_inappropriate_content_error(self, error: Exception) -> bool:
         """
@@ -1342,9 +1404,14 @@ class ReportAgent:
         state_abs = str(state_path.resolve())
         state_rel = os.path.relpath(state_abs, os.getcwd())
 
+        provenance_path = save_sidecar(self.state.provenance_bundle, html_path)
+        provenance_abs = str(provenance_path.resolve())
+        provenance_rel = os.path.relpath(provenance_abs, os.getcwd())
+
         logger.info(f"HTML报告已保存: {html_path}")
         logger.info(f"Document IR已保存: {ir_path}")
         logger.info(f"状态已保存到: {state_path}")
+        logger.info(f"证据审计文件已保存: {provenance_path}")
         
         return {
             'report_filename': html_filename,
@@ -1356,6 +1423,9 @@ class ReportAgent:
             'state_filename': state_filename,
             'state_filepath': state_abs,
             'state_relative_path': state_rel,
+            'provenance_filename': provenance_path.name,
+            'provenance_filepath': provenance_abs,
+            'provenance_relative_path': provenance_rel,
         }
 
     def _save_document_ir(self, document_ir: Dict[str, Any], query_safe: str, timestamp: str) -> Path:
@@ -1502,8 +1572,10 @@ class ReportAgent:
         """
         content = {
             'reports': [],
-            'forum_logs': ''
+            'forum_logs': '',
+            'provenance_bundle': ProvenanceBundle(agent="report_engine"),
         }
+        sidecar_bundles = []
         
         # 加载报告文件
         engines = ['query', 'media', 'insight']
@@ -1513,10 +1585,15 @@ class ReportAgent:
                     with open(file_paths[engine], 'r', encoding='utf-8') as f:
                         report_content = f.read()
                     content['reports'].append(report_content)
+                    sidecar_bundle = load_sidecar(file_paths[engine])
+                    if sidecar_bundle.evidence:
+                        sidecar_bundles.append(sidecar_bundle)
                     logger.info(f"已加载 {engine} 报告: {len(report_content)} 字符")
                 except Exception as e:
                     logger.exception(f"加载 {engine} 报告失败: {str(e)}")
                     content['reports'].append("")
+
+        content['provenance_bundle'] = merge_bundles(sidecar_bundles)
         
         # 加载论坛日志
         if 'forum' in file_paths:

@@ -30,6 +30,10 @@ from typing import Dict, Any, Optional
 
 from loguru import logger
 
+from common.provenance.io import load_sidecar
+from common.provenance.models import ProvenanceBundle
+from common.provenance.normalizer import merge_bundles
+
 # 全局配置
 VERBOSE = False
 
@@ -183,7 +187,11 @@ def load_engine_reports(latest_files: Dict[str, str]) -> list[str]:
     """
     reports = []
 
-    for engine, file_path in latest_files.items():
+    for engine in ('query', 'media', 'insight'):
+        file_path = latest_files.get(engine)
+        if not file_path:
+            reports.append("")
+            continue
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -193,6 +201,19 @@ def load_engine_reports(latest_files: Dict[str, str]) -> list[str]:
             logger.error(f"加载 {engine} 报告失败: {e}")
 
     return reports
+
+
+def load_provenance_bundle(latest_files: Dict[str, str]) -> ProvenanceBundle:
+    """Load audit sidecars only for CLI/replay compatibility."""
+    bundles = []
+    for engine in ('query', 'media', 'insight'):
+        file_path = latest_files.get(engine)
+        if not file_path:
+            continue
+        bundle = load_sidecar(file_path)
+        if bundle.evidence:
+            bundles.append(bundle)
+    return merge_bundles(bundles)
 
 
 def extract_query_from_reports(latest_files: Dict[str, str]) -> str:
@@ -221,7 +242,12 @@ def extract_query_from_reports(latest_files: Dict[str, str]) -> str:
     return "综合分析报告"
 
 
-def generate_report(reports: list[str], query: str, pdf_available: bool) -> Dict[str, Any]:
+def generate_report(
+    reports: list[str],
+    query: str,
+    pdf_available: bool,
+    provenance_bundle: Optional[ProvenanceBundle] = None,
+) -> Dict[str, Any]:
     """
     调用Report Engine生成报告
 
@@ -292,7 +318,8 @@ def generate_report(reports: list[str], query: str, pdf_available: bool) -> Dict
             forum_logs="",  # 不使用论坛日志
             custom_template="",  # 使用自动模板选择
             save_report=True,  # 自动保存报告
-            stream_handler=stream_handler
+            stream_handler=stream_handler,
+            provenance_bundle=provenance_bundle,
         )
 
         logger.success("✓ 报告生成成功！")
@@ -488,6 +515,7 @@ def main():
 
     # 加载报告内容
     reports = load_engine_reports(latest_files)
+    provenance_bundle = load_provenance_bundle(latest_files)
 
     if not reports:
         logger.error("❌ 未能加载任何报告内容")
@@ -498,7 +526,7 @@ def main():
     logger.info(f"使用报告主题: {query}")
 
     # 步骤 3: 生成报告
-    result = generate_report(reports, query, pdf_available)
+    result = generate_report(reports, query, pdf_available, provenance_bundle)
 
     # 步骤 4: 保存文件
     logger.info("\n" + "=" * 70)

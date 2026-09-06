@@ -8,6 +8,8 @@ from typing import List, Dict, Any, Optional
 import json
 from datetime import datetime
 
+from common.provenance.models import ProvenanceBundle
+
 
 @dataclass
 class Search:
@@ -16,6 +18,13 @@ class Search:
     url: str = ""                      # 搜索结果的链接
     title: str = ""                    # 搜索结果标题
     content: str = ""                  # 搜索返回的内容
+    source_table: str = ""             # 内部数据表
+    record_id: str = ""                # 行级稳定定位
+    query_time: str = ""               # 本次查询时间
+    filters: Dict[str, Any] = field(default_factory=dict)
+    time_window: Dict[str, Any] = field(default_factory=dict)
+    sample_size: int = 0
+    aggregation_method: str = ""
     score: Optional[float] = None      # 相关度评分
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     
@@ -26,6 +35,13 @@ class Search:
             "url": self.url,
             "title": self.title,
             "content": self.content,
+            "source_table": self.source_table,
+            "record_id": self.record_id,
+            "query_time": self.query_time,
+            "filters": self.filters,
+            "time_window": self.time_window,
+            "sample_size": self.sample_size,
+            "aggregation_method": self.aggregation_method,
             "score": self.score,
             "timestamp": self.timestamp
         }
@@ -38,6 +54,13 @@ class Search:
             url=data.get("url", ""),
             title=data.get("title", ""),
             content=data.get("content", ""),
+            source_table=data.get("source_table", ""),
+            record_id=str(data.get("record_id", data.get("primary_key", "")) or ""),
+            query_time=data.get("query_time", ""),
+            filters=data.get("filters", {}) or {},
+            time_window=data.get("time_window", {}) or {},
+            sample_size=int(data.get("sample_size", 0) or 0),
+            aggregation_method=data.get("aggregation_method", ""),
             score=data.get("score"),
             timestamp=data.get("timestamp", datetime.now().isoformat())
         )
@@ -63,6 +86,13 @@ class Research:
                 url=result.get("url", ""),
                 title=result.get("title", ""),
                 content=result.get("content", ""),
+                source_table=result.get("source_table", ""),
+                record_id=str(result.get("record_id", result.get("primary_key", "")) or ""),
+                query_time=result.get("query_time", ""),
+                filters=result.get("filters", {}) or {},
+                time_window=result.get("time_window", {}) or {},
+                sample_size=int(result.get("sample_size", 0) or 0),
+                aggregation_method=result.get("aggregation_method", ""),
                 score=result.get("score")
             )
             self.add_search(search)
@@ -146,6 +176,7 @@ class State:
     report_title: str = ""                                         # 报告标题
     paragraphs: List[Paragraph] = field(default_factory=list)     # 段落列表
     final_report: str = ""                                         # 最终报告内容
+    provenance_bundle: ProvenanceBundle = field(default_factory=lambda: ProvenanceBundle(agent="insight_engine"))
     is_completed: bool = False                                     # 是否完成
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -215,6 +246,7 @@ class State:
             "report_title": self.report_title,
             "paragraphs": [p.to_dict() for p in self.paragraphs],
             "final_report": self.final_report,
+            "provenance_bundle": self.provenance_bundle.to_dict(),
             "is_completed": self.is_completed,
             "created_at": self.created_at,
             "updated_at": self.updated_at
@@ -234,6 +266,7 @@ class State:
             report_title=data.get("report_title", ""),
             paragraphs=paragraphs,
             final_report=data.get("final_report", ""),
+            provenance_bundle=ProvenanceBundle.from_dict(data.get("provenance_bundle")),
             is_completed=data.get("is_completed", False),
             created_at=data.get("created_at", datetime.now().isoformat()),
             updated_at=data.get("updated_at", datetime.now().isoformat())

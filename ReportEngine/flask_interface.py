@@ -21,6 +21,7 @@ from loguru import logger
 from .agent import ReportAgent, create_agent
 from .nodes import ChapterJsonParseError
 from .utils.config import settings
+from common.provenance.runtime import runtime_store
 
 
 # 创建Blueprint
@@ -404,7 +405,7 @@ class ReportTask:
             return [evt for evt in self.event_history if evt['id'] > last_event_id]
 
 
-def check_engines_ready() -> Dict[str, Any]:
+def check_engines_ready(run_id: str = '') -> Dict[str, Any]:
     """
     检查三个子引擎是否都有新文件。
 
@@ -419,6 +420,8 @@ def check_engines_ready() -> Dict[str, Any]:
 
     forum_log_path = 'logs/forum.log'
 
+    if run_id:
+        return runtime_store.status(run_id)
     if not report_agent:
         return {
             'ready': False,
@@ -433,7 +436,7 @@ def check_engines_ready() -> Dict[str, Any]:
     )
 
 
-def run_report_generation(task: ReportTask, query: str, custom_template: str = ""):
+def run_report_generation(task: ReportTask, query: str, custom_template: str = "", run_id: str = ''):
     """
     在后台线程中运行报告生成。
 
@@ -460,7 +463,7 @@ def run_report_generation(task: ReportTask, query: str, custom_template: str = "
         task.publish_event('stage', {'message': '任务已启动，正在检查输入文件', 'stage': 'prepare'})
 
         # 检查输入文件
-        check_result = check_engines_ready()
+        check_result = check_engines_ready(run_id)
         if not check_result['ready']:
             task.update_status("error", 0, f"输入文件未准备就绪: {check_result.get('missing_files', [])}")
             return
@@ -472,7 +475,7 @@ def run_report_generation(task: ReportTask, query: str, custom_template: str = "
         })
 
         # 加载输入文件
-        content = report_agent.load_input_files(check_result['latest_files'])
+        content = runtime_store.inputs(run_id, query) if run_id else report_agent.load_input_files(check_result['latest_files'])
         task.publish_event('stage', {'message': '源数据加载完成，启动生成流程', 'stage': 'data_loaded'})
 
         # 生成报告（附带兜底重试，缓解瞬时网络抖动）
@@ -489,7 +492,8 @@ def run_report_generation(task: ReportTask, query: str, custom_template: str = "
                     forum_logs=content['forum_logs'],
                     custom_template=custom_template,
                     save_report=True,
-                    stream_handler=stream_handler
+                    stream_handler=stream_handler,
+                    provenance_bundle=content.get('provenance_bundle'),
                 )
                 break
             except ChapterJsonParseError as err:
@@ -583,7 +587,7 @@ def get_status():
         Response: JSON结构包含initialized/engines_ready/当前任务等。
     """
     try:
-        engines_status = check_engines_ready()
+        engines_status = check_engines_ready(request.args.get('run_id', ''))
 
         return jsonify({
             'success': True,
@@ -638,6 +642,7 @@ def generate_report():
             data = {}
         query = data.get('query', '智能舆情分析报告')
         custom_template = data.get('custom_template', '')
+        run_id = data.get('run_id', '')
 
         # 清空日志文件
         clear_report_log()
@@ -650,7 +655,7 @@ def generate_report():
             }), 500
 
         # 检查输入文件是否准备就绪
-        engines_status = check_engines_ready()
+        engines_status = check_engines_ready(run_id)
         if not engines_status['ready']:
             return jsonify({
                 'success': False,
@@ -681,7 +686,7 @@ def generate_report():
         # 在后台线程中运行报告生成
         thread = threading.Thread(
             target=run_report_generation,
-            args=(task, query, custom_template),
+            args=(task, query, custom_template, run_id),
             daemon=True
         )
         thread.start()

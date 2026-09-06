@@ -23,6 +23,10 @@ from .tools import TavilyNewsAgency, TavilyResponse
 from .utils import Settings, format_search_results_for_prompt
 from loguru import logger
 
+from common.provenance.io import save_sidecar
+from common.provenance.models import ProvenanceBundle
+from common.provenance.normalizer import add_search_results_to_bundle, stable_id
+
 class DeepSearchAgent:
     """Deep Search Agent主类"""
     
@@ -71,6 +75,28 @@ class DeepSearchAgent:
         self.first_summary_node = FirstSummaryNode(self.llm_client)
         self.reflection_summary_node = ReflectionSummaryNode(self.llm_client)
         self.report_formatting_node = ReportFormattingNode(self.llm_client)
+
+    def _capture_provenance(
+        self,
+        search_results: List[Dict[str, Any]],
+        search_query: str,
+        paragraph_title: str,
+        search_tool: str,
+    ) -> None:
+        enriched_results = []
+        for result in search_results:
+            item = dict(result)
+            item["search_tool"] = search_tool
+            item["source_type"] = "web"
+            item["evidence_type"] = "web"
+            enriched_results.append(item)
+        self.state.provenance_bundle = add_search_results_to_bundle(
+            self.state.provenance_bundle,
+            agent="query_engine",
+            results=enriched_results,
+            query=search_query,
+            paragraph_title=paragraph_title,
+        )
     
     def _validate_date_format(self, date_str: str) -> bool:
         """
@@ -152,6 +178,12 @@ class DeepSearchAgent:
         logger.info(f"\n{'='*60}")
         logger.info(f"开始深度研究: {query}")
         logger.info(f"{'='*60}")
+
+        self.state.provenance_bundle = ProvenanceBundle(
+            agent="query_engine",
+            bundle_id=stable_id("bundle", "query_engine", query, datetime.now().isoformat()),
+            meta={"query": query},
+        )
         
         try:
             # Step 1: 生成报告结构
@@ -285,6 +317,7 @@ class DeepSearchAgent:
             logger.info("  - 未找到搜索结果")
         # 更新状态中的搜索历史
         paragraph.research.add_search_results(search_query, search_results)
+        self._capture_provenance(search_results, search_query, paragraph.title, search_tool)
         
         # 生成初始总结
         logger.info("  - 生成初始总结...")
@@ -376,6 +409,7 @@ class DeepSearchAgent:
             
             # 更新搜索历史
             paragraph.research.add_search_results(search_query, search_results)
+            self._capture_provenance(search_results, search_query, paragraph.title, search_tool)
             
             # 生成反思总结
             reflection_summary_input = {
@@ -436,8 +470,11 @@ class DeepSearchAgent:
         # 保存报告
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(report_content)
+
+        sidecar = save_sidecar(self.state.provenance_bundle, filepath)
         
         logger.info(f"报告已保存到: {filepath}")
+        logger.info(f"证据审计文件已保存到: {sidecar}")
         
         # 保存状态（如果配置允许）
         if self.config.SAVE_INTERMEDIATE_STATES:
