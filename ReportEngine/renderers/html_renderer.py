@@ -1204,6 +1204,15 @@ class HTMLRenderer:
     def _render_paragraph(self, block: Dict[str, Any]) -> str:
         """渲染段落，内部通过inline run保持混排样式"""
         inlines_data = block.get("inlines", [])
+
+        # 兼容已落盘的旧 IR：证据门禁淘汰全部主张后留下的占位段落
+        # 不应出现在用户看到的报告中。
+        if (
+            block.get("support_status") == "unsupported"
+            and not block.get("claims")
+            and not block.get("citation_refs")
+        ):
+            return ""
         
         # 检测并跳过包含文档元数据 JSON 的段落
         if self._is_metadata_paragraph(inlines_data):

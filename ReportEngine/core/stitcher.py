@@ -83,6 +83,8 @@ class DocumentComposer:
         if provenance_bundle is not None:
             for chapter in ordered:
                 chapter["blocks"] = sanitize_blocks(chapter.get("blocks", []), merged_bundle)
+                if not chapter["blocks"]:
+                    self._ensure_heading_block(chapter)
         chapter_claims: List[ClaimRecord] = []
         for chapter in ordered:
             self._collect_nested_claims(chapter.get("blocks", []), chapter_claims)

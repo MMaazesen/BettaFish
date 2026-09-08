@@ -417,14 +417,7 @@ class ChapterGenerationNode(BaseNode):
                     "level": 2,
                     "text": section.title,
                     "anchor": section.slug,
-                },
-                {
-                    "type": "paragraph",
-                    "inlines": [{"text": "本章未检索到可追溯证据。"}],
-                    "claims": [],
-                    "citation_refs": [],
-                    "support_status": "unsupported",
-                },
+                }
             ],
         }
 

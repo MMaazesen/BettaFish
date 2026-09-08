@@ -351,7 +351,7 @@ SYSTEM_PROMPT_CHAPTER_JSON = f"""
 24. claim_type=inference 至少绑定2条不同证据；只有1条时必须标为 weak 并使用审慎措辞，没有证据时删除。claim_type=prediction/recommendation 必须标为 predicted，并单独放在预测/建议段落，不得与 fact/metric 混在同一block。
 25. citation_refs 是该block全部有效 claim 的 evidence_ids 去重并集。scope 尽量包含 subject、time_range、platform、condition；数据库证据还应保留 table、filters、time_window、sample_size、aggregation_method、row_ids。
 26. forumLogs 中的消息本身不是证据；只有其中显式 referenced_evidence_ids 指向 selectedEvidence 的条目才可帮助定位证据，仍须直接引用对应 evidence_id。旧纯文本论坛日志不得推断引用。
-27. selectedEvidence.evidence 为空时，不得生成具体事实、数字、比例、排名、涨跌或指标，只输出简短的“本章未检索到可追溯证据”。
+27. selectedEvidence.evidence 为空时，不得生成具体事实、数字、比例、排名、涨跌、指标或“未检索到证据”之类的占位文案，只保留章节 heading。
 
 <CHAPTER JSON SCHEMA>
 {CHAPTER_JSON_SCHEMA_TEXT}

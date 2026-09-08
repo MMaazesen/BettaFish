@@ -148,6 +148,13 @@ class MarkdownRenderer:
 
     def _render_paragraph(self, block: Dict[str, Any]) -> str:
         inlines = block.get("inlines", [])
+        # 与 HTML/PDF 输出一致，隐藏旧 IR 中无主张、无引用的证据占位段落。
+        if (
+            block.get("support_status") == "unsupported"
+            and not block.get("claims")
+            and not block.get("citation_refs")
+        ):
+            return ""
         # 检测并跳过包含文档元数据 JSON 的段落
         if self._is_metadata_paragraph(inlines):
             return ""

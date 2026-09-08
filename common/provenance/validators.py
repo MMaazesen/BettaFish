@@ -189,5 +189,10 @@ def sanitize_blocks(blocks: Any, evidence: Iterable[str] | ProvenanceBundle) -> 
                 if isinstance(cell, Mapping):
                     children.extend(sanitize_blocks(cell.get("blocks"), evidence))
         valid_children = [child for child in children if child.get("claims") or child.get("type") == "heading"]
-        result.extend(own + valid_children if own or valid_children else [_claim_paragraph([])])
+        # Unsupported leaf blocks carry no user-visible information.  Dropping
+        # them here keeps the IR free of repeated "no evidence" placeholders;
+        # headings are preserved above so chapter structure and anchors remain
+        # stable even when a subsection has no admissible claims.
+        if own or valid_children:
+            result.extend(own + valid_children)
     return result

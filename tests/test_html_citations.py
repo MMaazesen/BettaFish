@@ -7,6 +7,20 @@ from ReportEngine.renderers.html_renderer import HTMLRenderer
 
 
 class HtmlCitationTests(unittest.TestCase):
+    def test_unsupported_placeholder_paragraph_is_not_rendered(self):
+        renderer = HTMLRenderer()
+        html = renderer._render_paragraph(
+            {
+                "type": "paragraph",
+                "inlines": [{"text": "本段未检索到可追溯证据。"}],
+                "claims": [],
+                "citation_refs": [],
+                "support_status": "unsupported",
+            }
+        )
+
+        self.assertEqual(html, "")
+
     def test_paragraph_renders_clickable_hover_citation(self):
         bundle = ProvenanceBundle(
             sources=[

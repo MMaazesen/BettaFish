@@ -65,10 +65,11 @@ class RuntimeProvenanceTests(unittest.TestCase):
 
         document = DocumentComposer().build_document("report-1", {}, [chapter], bundle)
 
-        paragraph = document["chapters"][0]["blocks"][0]
         self.assertEqual(document["provenanceIndex"]["evidence"], {})
-        self.assertEqual(paragraph["support_status"], "unsupported")
-        self.assertEqual(paragraph["inlines"][0]["text"], "本段未检索到可追溯证据。")
+        blocks = document["chapters"][0]["blocks"]
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["type"], "heading")
+        self.assertNotIn("本段未检索到可追溯证据", str(blocks))
 
 
 if __name__ == "__main__":
